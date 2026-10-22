@@ -6,7 +6,7 @@
 - **Felipe Andres Rubilar Olivares**
 
 ## Repositorio GitHub
-- **Enlace:** 
+- **Enlace:https://github.com/FelipeRubDev/EP2_DSY1105-007_Campillay_Campillay_Rubilar.git** 
 
 ---
 
