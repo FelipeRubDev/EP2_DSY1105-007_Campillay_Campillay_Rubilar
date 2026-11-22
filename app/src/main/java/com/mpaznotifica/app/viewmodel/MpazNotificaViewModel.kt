@@ -8,6 +8,7 @@ import com.mpaznotifica.app.model.CanalDespacho
 import com.mpaznotifica.app.model.Comunicacion
 import com.mpaznotifica.app.model.EnvioDestinatario
 import com.mpaznotifica.app.model.ErroresComunicado
+import com.mpaznotifica.app.model.ErroresLogin
 import com.mpaznotifica.app.model.Perfil
 import com.mpaznotifica.app.model.TipoComunicacion
 import com.mpaznotifica.app.model.Usuario
@@ -16,8 +17,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import androidx.lifecycle.viewModelScope
 import com.mpaznotifica.app.data.local.ComunicacionEntity
+import com.mpaznotifica.app.data.local.EnvioDestinatarioEntity
+import com.mpaznotifica.app.data.remote.Despachador
+import com.mpaznotifica.app.data.remote.DespachadorSimulado
 import com.mpaznotifica.app.data.repository.ComunicacionRepository
+import com.mpaznotifica.app.model.EstadoEnvio
+import com.mpaznotifica.app.model.ResolvedorDestinatarios
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -29,15 +38,12 @@ import java.util.Locale
 /**
  * ViewModel único, compartido por todas las pantallas (se crea una sola vez en AppNavigation).
  *
- * ESTO ES UN ESQUELETO: las pantallas ya llaman a todas estas funciones, pero la lógica de
- * negocio del caso está vacía a propósito y marcada con TODO(equipo), citando el módulo de
- * Requerimientos_DSY1105-007 al que corresponde. Mientras no se implemente:
- *  - el login siempre rechaza (usar "Modo desarrollo" en la pantalla de login),
- *  - cualquier perfil ve todos los alcances y tipos (sin restricción por perfil),
- *  - enviar un comunicado o cambiar el canal de un apoderado no hace nada,
- *  - los filtros del historial no filtran.
+ * Concentra el estado de sesión, la validación del formulario, el armado del comunicado y
+ * la observación de los datos que vienen de Room.
  */
-class MpazNotificaViewModel : ViewModel() {
+class MpazNotificaViewModel(
+    private val despachador: Despachador = DespachadorSimulado()
+) : ViewModel() {
 
     // =====================================================================
     // Módulo "Autenticación y perfiles"
@@ -46,32 +52,48 @@ class MpazNotificaViewModel : ViewModel() {
     private val _usuarioActivo = MutableStateFlow<Usuario?>(null)
     val usuarioActivo: StateFlow<Usuario?> = _usuarioActivo.asStateFlow()
 
-    private val _errorLogin = MutableStateFlow<String?>(null)
-    val errorLogin: StateFlow<String?> = _errorLogin.asStateFlow()
+    private val _erroresLogin = MutableStateFlow(ErroresLogin())
+    val erroresLogin: StateFlow<ErroresLogin> = _erroresLogin.asStateFlow()
 
     /**
-     * TODO(equipo): inicio de sesión diferenciado para Inspectoría General y Profesor/a Jefe.
-     * Validar campos vacíos (patrón Guía 11) y luego comparar contra MockData.usuarios (o el
-     * backend que confirme el CITT). Si es correcto: dejar _usuarioActivo y devolver true.
-     * Si no: dejar _errorLogin con un mensaje y devolver false.
+     * Inicio de sesión diferenciado. Valida por campo y luego compara contra los usuarios
+     * de prueba. No usa backend: el caso lo permite mientras el CITT no lo confirme.
      */
     fun login(usuario: String, clave: String): Boolean {
-        _errorLogin.value = "Login sin implementar — ver TODO(equipo) en MpazNotificaViewModel.login()."
-        return false
-    }
+        val correo = usuario.trim()
 
-    /**
-     * SOLO PARA DESARROLLO: entra con el usuario de prueba del perfil indicado, sin validar
-     * credenciales. TODO(equipo): eliminar esta función y los botones "Modo desarrollo".
-     */
-    fun entrarModoDesarrollo(perfil: Perfil) {
-        _usuarioActivo.value = MockData.usuarios.first { it.perfil == perfil }
-        _errorLogin.value = null
+        val errorUsuario = when {
+            correo.isBlank() -> "Ingresa tu correo institucional"
+            !correo.contains("@") -> "El correo no es válido"
+            else -> null
+        }
+        val errorClave = when {
+            clave.isBlank() -> "Ingresa tu clave"
+            clave.length < 6 -> "La clave debe tener al menos 6 caracteres"
+            else -> null
+        }
+
+        if (errorUsuario != null || errorClave != null) {
+            _erroresLogin.value = ErroresLogin(usuario = errorUsuario, clave = errorClave)
+            return false
+        }
+
+        val encontrado = MockData.usuarios.find {
+            it.usuario.equals(correo, ignoreCase = true) && it.clave == clave
+        }
+        if (encontrado == null) {
+            _erroresLogin.value = ErroresLogin(general = "Correo o clave incorrectos")
+            return false
+        }
+
+        _usuarioActivo.value = encontrado
+        _erroresLogin.value = ErroresLogin()
+        return true
     }
 
     fun logout() {
         _usuarioActivo.value = null
-        _errorLogin.value = null
+        _erroresLogin.value = ErroresLogin()
         _comunicadoSeleccionadoId.value = null
     }
 
@@ -96,36 +118,46 @@ class MpazNotificaViewModel : ViewModel() {
     // =====================================================================
 
     /**
-     * TODO(equipo): devolver solo los alcances que el perfil puede usar.
-     * RF: "restringir las opciones de emisión según el perfil autenticado".
-     * Regla de negocio: un Profesor/a Jefe no puede emitir a "colegio completo" ni a un curso
-     * distinto al propio (alcance sobre talleres pendiente de confirmar con el CITT).
-     * Hoy devuelve los cuatro alcances para cualquier perfil.
+     * Alcances que el perfil puede usar. El Profesor/a Jefe solo emite a su curso.
      */
-    fun alcancesPermitidos(usuario: Usuario?): List<AlcanceEnvio> = AlcanceEnvio.entries.toList()
+    fun alcancesPermitidos(usuario: Usuario?): List<AlcanceEnvio> = when (usuario?.perfil) {
+        null -> emptyList()
+        Perfil.INSPECTORIA_GENERAL -> AlcanceEnvio.entries.toList()
+        Perfil.PROFESOR_JEFE -> listOf(AlcanceEnvio.CURSO)
+    }
 
     /**
-     * TODO(equipo): devolver solo los tipos de comunicación que el perfil puede emitir.
-     * Criterio de éxito del caso: un Profesor/a Jefe no puede enviar circulares institucionales,
-     * solo lo referente a su curso. Hoy devuelve todos los tipos.
+     * Tipos que el perfil puede emitir. El Profesor/a Jefe no puede enviar circulares
+     * institucionales; el resto de los tipos sigue disponible.
      */
-    fun tiposPermitidos(usuario: Usuario?): List<TipoComunicacion> = TipoComunicacion.entries.toList()
+    fun tiposPermitidos(usuario: Usuario?): List<TipoComunicacion> = when (usuario?.perfil) {
+        null -> emptyList()
+        Perfil.INSPECTORIA_GENERAL -> TipoComunicacion.entries.toList()
+        Perfil.PROFESOR_JEFE -> TipoComunicacion.entries.filter { it != TipoComunicacion.INSTITUCIONAL }
+    }
 
     /**
-     * TODO(equipo): opciones de destino según el alcance, respetando el perfil (por ejemplo, un
-     * Profesor/a Jefe solo debería ver su propio curso). Hoy muestra todas las opciones.
+     * Opciones de destino según el alcance. El Profesor/a Jefe solo ve su propio curso.
      */
     fun destinosPara(alcance: AlcanceEnvio?, usuario: Usuario?): List<String> = when (alcance) {
-        AlcanceEnvio.CURSO -> cursos
-        AlcanceEnvio.TALLER -> talleres.map { it.nombre }
-        AlcanceEnvio.APODERADO_INDIVIDUAL -> _apoderados.value.map { it.nombreCompleto }
+        AlcanceEnvio.CURSO -> when (usuario?.perfil) {
+            Perfil.PROFESOR_JEFE -> listOfNotNull(usuario.cursoAsignado)
+            else -> cursos
+        }
+        AlcanceEnvio.TALLER -> when (usuario?.perfil) {
+            Perfil.PROFESOR_JEFE -> emptyList()
+            else -> talleres.map { it.nombre }
+        }
+        AlcanceEnvio.APODERADO_INDIVIDUAL -> when (usuario?.perfil) {
+            Perfil.PROFESOR_JEFE -> emptyList()
+            else -> _apoderados.value.map { it.nombreCompleto }
+        }
         AlcanceEnvio.COLEGIO_COMPLETO, null -> emptyList()
     }
 
     /**
-     * TODO(equipo): validar el formulario y devolver los errores por campo: asunto y cuerpo
-     * obligatorios, tipo y alcance elegidos, destino obligatorio salvo "colegio completo", y que
-     * el alcance esté permitido para el perfil. Hoy devuelve "sin errores" siempre.
+     * Valida el formulario y devuelve un mensaje por campo. Además de los obligatorios,
+     * comprueba que el tipo y el alcance estén permitidos para el perfil activo.
      */
 
 
@@ -195,7 +227,12 @@ class MpazNotificaViewModel : ViewModel() {
         )
     }
 
-    private val _envios = MutableStateFlow(MockData.envios)
+    private val _estadoEnvio = MutableStateFlow<EstadoEnvioUi>(EstadoEnvioUi.Inactivo)
+    val estadoEnvio: StateFlow<EstadoEnvioUi> = _estadoEnvio.asStateFlow()
+
+    private val _eventoNotificacion = MutableSharedFlow<EventoEnvio>(extraBufferCapacity = 1)
+    val eventoNotificacion: SharedFlow<EventoEnvio> = _eventoNotificacion.asSharedFlow()
+
     private lateinit var repository: ComunicacionRepository
 
     // Función para inicializar la base de datos desde la UI
@@ -218,6 +255,7 @@ class MpazNotificaViewModel : ViewModel() {
                         alcance = try { AlcanceEnvio.valueOf(entity.alcance) } catch (e: Exception) { AlcanceEnvio.CURSO },
                         destinoReferencia = entity.destino,
                         adjuntoPdfNombre = entity.adjuntoPdfNombre,
+                        adjuntoPdfUri = entity.adjuntoPdfUri,
                         requiereFirmaFisica = false,
                         autorId = entity.autorId,
                         autorNombre = autorObj.nombre,
@@ -233,17 +271,40 @@ class MpazNotificaViewModel : ViewModel() {
             MutableStateFlow(MockData.comunicados)
         }
     }
+
+    // Estado de los envíos por destinatario, leído desde Room.
+    val envios: StateFlow<List<EnvioDestinatario>> by lazy {
+        if (::repository.isInitialized) {
+            repository.todosLosEnvios.map { lista ->
+                lista.map { entity ->
+                    EnvioDestinatario(
+                        id = entity.id,
+                        comunicacionId = entity.comunicacionId,
+                        apoderadoId = entity.apoderadoId,
+                        canal = try { CanalDespacho.valueOf(entity.canal) } catch (e: Exception) { CanalDespacho.EMAIL },
+                        estado = try { EstadoEnvio.valueOf(entity.estado) } catch (e: Exception) { EstadoEnvio.FALLIDO }
+                    )
+                }
+            }.stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
+        } else {
+            MutableStateFlow(emptyList())
+        }
+    }
+
+    fun limpiarEstadoEnvio() {
+        _estadoEnvio.value = EstadoEnvioUi.Inactivo
+    }
+
     /**
-     * TODO(equipo): registrar el comunicado y simular su despacho. RF del módulo:
-     *  - guardar automáticamente autor (usuarioActivo), fecha/hora, contenido y destinatarios;
-     *  - resolver los apoderados destinatarios según el alcance (curso, taller, individual o todos);
-     *  - simular el envío por el canal preferente de cada apoderado mediante un servicio mock
-     *    (ver data/remote/ApiPendiente.kt) y guardar un EnvioDestinatario con su estado
-     *    (despachado/fallido) por cada uno;
-     *  - si requiereFirmaFisica: solo informar por correo y alertar que corresponde firma en
-     *    papel (no capturar firmas).
-     * Regla: el registro queda inmutable una vez enviado.
-     * Hoy no hace nada: el comunicado no aparece en el historial.
+     * Registra el comunicado y simula el despacho:
+     *  - resuelve los apoderados según el alcance;
+     *  - envía por el canal preferente de cada uno;
+     *  - guarda el comunicado y un estado por destinatario en una transacción.
+     * Si no hay destinatarios, no se guarda nada.
      */
     fun enviarComunicado(
         asunto: String,
@@ -252,14 +313,32 @@ class MpazNotificaViewModel : ViewModel() {
         alcance: AlcanceEnvio,
         destino: String?,
         adjuntoPdfNombre: String?,
-        requiereFirmaFisica: Boolean
+        requiereFirmaFisica: Boolean,
+        adjuntoPdfUri: String? = null
     ) {
         val autorActual = _usuarioActivo.value ?: return
+        if (!::repository.isInitialized) {
+            _estadoEnvio.value = EstadoEnvioUi.Error("La base de datos no está disponible")
+            return
+        }
+
+        val destinatarios = ResolvedorDestinatarios.apoderadosPara(
+            alcance = alcance,
+            destino = destino,
+            apoderados = _apoderados.value,
+            estudiantes = MockData.estudiantes,
+            talleres = talleres
+        )
+        if (destinatarios.isEmpty()) {
+            _estadoEnvio.value = EstadoEnvioUi.Error("No hay apoderados para ese destino")
+            return
+        }
 
         val fechaActual = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+        val comunicadoId = UUID.randomUUID().toString()
 
         val nuevoComunicadoEntity = ComunicacionEntity(
-            id = UUID.randomUUID().toString(),
+            id = comunicadoId,
             asunto = asunto,
             cuerpo = cuerpo,
             tipo = tipo.name,
@@ -267,12 +346,43 @@ class MpazNotificaViewModel : ViewModel() {
             destino = destino,
             fechaEnvio = fechaActual,
             autorId = autorActual.id,
-            adjuntoPdfNombre = adjuntoPdfNombre
+            adjuntoPdfNombre = adjuntoPdfNombre,
+            adjuntoPdfUri = adjuntoPdfUri
         )
 
+        _estadoEnvio.value = EstadoEnvioUi.Enviando
+
         viewModelScope.launch {
-            if (::repository.isInitialized) {
-                repository.guardarComunicado(nuevoComunicadoEntity)
+            val enviosEntities = destinatarios.map { apoderado ->
+                val estado = runCatching {
+                    despachador.enviar(apoderado, asunto)
+                }.getOrDefault(EstadoEnvio.FALLIDO)
+
+                EnvioDestinatarioEntity(
+                    id = UUID.randomUUID().toString(),
+                    comunicacionId = comunicadoId,
+                    apoderadoId = apoderado.id,
+                    canal = apoderado.canalPreferente.name,
+                    estado = estado.name
+                )
+            }
+
+            try {
+                repository.registrarEnvio(nuevoComunicadoEntity, enviosEntities)
+
+                val despachados = enviosEntities.count { it.estado == EstadoEnvio.DESPACHADO.name }
+                val fallidos = enviosEntities.size - despachados
+                _estadoEnvio.value = EstadoEnvioUi.Exito(despachados, fallidos)
+                _eventoNotificacion.emit(
+                    EventoEnvio(
+                        asunto = asunto,
+                        despachados = despachados,
+                        fallidos = fallidos,
+                        requiereFirmaFisica = requiereFirmaFisica
+                    )
+                )
+            } catch (e: Exception) {
+                _estadoEnvio.value = EstadoEnvioUi.Error("No se pudo guardar el comunicado")
             }
         }
     }
@@ -291,7 +401,7 @@ class MpazNotificaViewModel : ViewModel() {
     // Se usa comunicados.value en lugar de _comunicados.value
     fun comunicadoPorId(id: String?): Comunicacion? = comunicados.value.find { it.id == id }
     fun enviosDe(comunicacionId: String): List<EnvioDestinatario> =
-        _envios.value.filter { it.comunicacionId == comunicacionId }
+        envios.value.filter { it.comunicacionId == comunicacionId }
 
     // Se usa comunicados.value en lugar de _comunicados.value
     fun historialFiltrado(

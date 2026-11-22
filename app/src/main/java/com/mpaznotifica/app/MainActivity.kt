@@ -24,7 +24,7 @@ class MainActivity : ComponentActivity() {
 
         // 1. Inicializamos la base de datos Room y el Repositorio
         val database = AppDatabase.getDatabase(applicationContext)
-        val repository = ComunicacionRepository(database.comunicacionDao())
+        val repository = ComunicacionRepository(database)
 
         // 2. Conectamos el Repositorio con el ViewModel
         viewModel.inicializarRepository(repository)

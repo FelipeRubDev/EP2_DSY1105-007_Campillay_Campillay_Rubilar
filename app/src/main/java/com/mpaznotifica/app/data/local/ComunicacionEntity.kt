@@ -14,5 +14,6 @@ data class ComunicacionEntity(
     val destino: String?,
     val fechaEnvio: String,
     val autorId: String,
-    val adjuntoPdfNombre: String? = null
+    val adjuntoPdfNombre: String? = null,
+    val adjuntoPdfUri: String? = null
 )

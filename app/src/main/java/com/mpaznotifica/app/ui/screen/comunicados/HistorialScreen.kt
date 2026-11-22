@@ -1,5 +1,8 @@
 package com.mpaznotifica.app.ui.screen.comunicados
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -96,11 +99,20 @@ fun HistorialScreen(navController: NavHostController, viewModel: MpazNotificaVie
                 modifier = Modifier.padding(vertical = 8.dp)
             )
 
+            AnimatedVisibility(visible = lista.isEmpty(), enter = fadeIn(), exit = fadeOut()) {
+                Text(
+                    "No hay comunicados para los filtros seleccionados.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
+
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(lista) { comunicado ->
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .animateItem()
                             .clickable {
                                 viewModel.seleccionarComunicado(comunicado.id)
                                 navController.navigate(Rutas.DETALLE)

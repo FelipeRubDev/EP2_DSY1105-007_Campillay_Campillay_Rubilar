@@ -1,5 +1,6 @@
 package com.mpaznotifica.app.ui.screen.comunicados
 
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -27,6 +28,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,13 +42,24 @@ import androidx.navigation.NavHostController
 import com.mpaznotifica.app.model.AlcanceEnvio
 import com.mpaznotifica.app.model.ErroresComunicado
 import com.mpaznotifica.app.model.TipoComunicacion
+import com.mpaznotifica.app.notificaciones.NotificadorLocal
 import com.mpaznotifica.app.ui.components.BarraSuperior
 import com.mpaznotifica.app.ui.components.SelectorDesplegable
+import com.mpaznotifica.app.viewmodel.EstadoEnvioUi
 import com.mpaznotifica.app.viewmodel.MpazNotificaViewModel
 
 @Composable
 fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNotificaViewModel) {
     val usuario by viewModel.usuarioActivo.collectAsState()
+    val estadoEnvio by viewModel.estadoEnvio.collectAsState()
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        viewModel.limpiarEstadoEnvio()
+        viewModel.eventoNotificacion.collect { evento ->
+            NotificadorLocal.mostrar(context, evento)
+        }
+    }
 
     var asunto by remember { mutableStateOf("") }
     var cuerpo by remember { mutableStateOf("") }
@@ -54,12 +67,11 @@ fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNo
     var alcance by remember { mutableStateOf<AlcanceEnvio?>(null) }
     var destino by remember { mutableStateOf<String?>(null) }
     var adjunto by remember { mutableStateOf<String?>(null) }
+    var adjuntoUri by remember { mutableStateOf<String?>(null) }
     var requiereFirma by remember { mutableStateOf(false) }
     var errores by remember { mutableStateOf(ErroresComunicado()) }
     var confirmando by remember { mutableStateOf(false) }
-    var enviado by remember { mutableStateOf(false) }
 
-    val context = LocalContext.current
     val selectorPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             var nombre: String? = null
@@ -68,6 +80,13 @@ fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNo
                 if (idx >= 0 && cursor.moveToFirst()) nombre = cursor.getString(idx)
             }
             adjunto = nombre ?: uri.lastPathSegment ?: "documento.pdf"
+            adjuntoUri = runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                uri.toString()
+            }.getOrNull()
         }
     }
 
@@ -141,11 +160,16 @@ fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNo
                 OutlinedButton(onClick = { selectorPdf.launch(arrayOf("application/pdf")) }) {
                     Text(if (adjunto == null) "Adjuntar PDF (opcional)" else "Cambiar PDF")
                 }
-                if (adjunto != null) {
-                    TextButton(onClick = { adjunto = null }) { Text("Quitar") }
+            }
+            AnimatedVisibility(visible = adjunto != null, enter = fadeIn(), exit = fadeOut()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Adjunto: ${adjunto.orEmpty()}", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = {
+                        adjunto = null
+                        adjuntoUri = null
+                    }) { Text("Quitar") }
                 }
             }
-            adjunto?.let { Text("Adjunto: $it", style = MaterialTheme.typography.bodySmall) }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = requiereFirma, onCheckedChange = { requiereFirma = it })
@@ -174,11 +198,14 @@ fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNo
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
+                enabled = estadoEnvio !is EstadoEnvioUi.Enviando,
                 onClick = {
                     errores = viewModel.validarComunicado(asunto, cuerpo, tipo, alcance, destino)
                     if (!errores.hayErrores && tipo != null && alcance != null) confirmando = true
                 }
-            ) { Text("Enviar") }
+            ) {
+                Text(if (estadoEnvio is EstadoEnvioUi.Enviando) "Enviando..." else "Enviar")
+            }
         }
     }
 
@@ -199,11 +226,11 @@ fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNo
                             alcance = alcanceElegido,
                             destino = destino,
                             adjuntoPdfNombre = adjunto,
-                            requiereFirmaFisica = requiereFirma
+                            requiereFirmaFisica = requiereFirma,
+                            adjuntoPdfUri = adjuntoUri
                         )
                     }
                     confirmando = false
-                    enviado = true
                 }) { Text("Enviar") }
             },
             dismissButton = {
@@ -212,17 +239,33 @@ fun RedactarComunicadoScreen(navController: NavHostController, viewModel: MpazNo
         )
     }
 
-    if (enviado) {
-        AlertDialog(
+    when (val estado = estadoEnvio) {
+        is EstadoEnvioUi.Exito -> AlertDialog(
             onDismissRequest = { },
             title = { Text("Comunicado enviado") },
-            text = { Text("El comunicado fue registrado exitosamente en la base de datos local (Room).") },
+            text = {
+                Text(
+                    "Registrado en la base local. " +
+                        "Despachados: ${estado.despachados}. Fallidos: ${estado.fallidos}."
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    enviado = false
+                    viewModel.limpiarEstadoEnvio()
                     navController.popBackStack()
                 }) { Text("Aceptar") }
             }
         )
+
+        is EstadoEnvioUi.Error -> AlertDialog(
+            onDismissRequest = { viewModel.limpiarEstadoEnvio() },
+            title = { Text("No se pudo enviar") },
+            text = { Text(estado.mensaje) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.limpiarEstadoEnvio() }) { Text("Cerrar") }
+            }
+        )
+
+        else -> Unit
     }
 }

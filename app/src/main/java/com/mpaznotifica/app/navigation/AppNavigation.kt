@@ -1,5 +1,10 @@
 package com.mpaznotifica.app.navigation
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
@@ -48,7 +53,22 @@ fun AppNavigation(
         }
     }
 
-    NavHost(navController = navController, startDestination = Rutas.LOGIN) {
+    NavHost(
+        navController = navController,
+        startDestination = Rutas.LOGIN,
+        enterTransition = {
+            fadeIn(tween(220)) + slideInHorizontally(tween(220)) { it / 12 }
+        },
+        exitTransition = {
+            fadeOut(tween(160))
+        },
+        popEnterTransition = {
+            fadeIn(tween(220)) + slideInHorizontally(tween(220)) { -it / 12 }
+        },
+        popExitTransition = {
+            fadeOut(tween(160)) + slideOutHorizontally(tween(160)) { it / 12 }
+        }
+    ) {
         composable(Rutas.LOGIN) {
             LoginScreen(
                 viewModel = viewModel,

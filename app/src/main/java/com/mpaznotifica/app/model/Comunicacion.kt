@@ -37,6 +37,7 @@ data class Comunicacion(
     val alcance: AlcanceEnvio,
     val destinoReferencia: String? = null,
     val adjuntoPdfNombre: String? = null,
+    val adjuntoPdfUri: String? = null,
     val requiereFirmaFisica: Boolean = false,
     val autorId: String,
     val autorNombre: String,

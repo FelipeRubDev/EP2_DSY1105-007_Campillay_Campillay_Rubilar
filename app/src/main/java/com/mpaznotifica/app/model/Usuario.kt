@@ -12,3 +12,13 @@ data class Usuario(
     val perfil: Perfil,
     val cursoAsignado: String? = null
 )
+
+/** Errores del login separados por campo, para pintarlos bajo cada texto. */
+data class ErroresLogin(
+    val usuario: String? = null,
+    val clave: String? = null,
+    val general: String? = null
+) {
+    val hayErrores: Boolean
+        get() = usuario != null || clave != null || general != null
+}

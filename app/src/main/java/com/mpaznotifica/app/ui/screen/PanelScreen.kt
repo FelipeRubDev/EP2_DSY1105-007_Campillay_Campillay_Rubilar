@@ -1,5 +1,12 @@
 package com.mpaznotifica.app.ui.screen
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,10 +21,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavHostController
 import com.mpaznotifica.app.navigation.Rutas
 import com.mpaznotifica.app.ui.components.BarraSuperior
@@ -38,6 +48,22 @@ fun PanelScreen(
     val usuario by viewModel.usuarioActivo.collectAsState()
     val comunicados by viewModel.comunicados.collectAsState()
 
+    val context = LocalContext.current
+    val permisoNotificaciones = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            permisoNotificaciones.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     Scaffold(topBar = { BarraSuperior("MPAZ Notifica", navController, onCerrarSesion) }) { padding ->
         Column(
             modifier = Modifier
@@ -49,13 +75,15 @@ fun PanelScreen(
         ) {
             Text("Hola, ${usuario?.nombre.orEmpty()}", style = MaterialTheme.typography.titleLarge)
 
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(modifier = Modifier.fillMaxWidth().animateContentSize()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("Perfil: ${usuario?.perfil?.etiqueta.orEmpty()}", style = MaterialTheme.typography.bodyMedium)
                     usuario?.cursoAsignado?.let {
                         Text("Curso de jefatura: $it", style = MaterialTheme.typography.bodyMedium)
                     }
-                    Text("Comunicados en la bitácora: ${comunicados.size}", style = MaterialTheme.typography.bodyMedium)
+                    AnimatedContent(targetState = comunicados.size, label = "contadorComunicados") { total ->
+                        Text("Comunicados en la bitácora: $total", style = MaterialTheme.typography.bodyMedium)
+                    }
                 }
             }
 
